@@ -129,7 +129,8 @@ const DEFAULT_SEED_DATA = {
             { id: 'RES-801', guest: 'Michael Chang', room: '104', type: 'Deluxe Room', checkIn: '2026-09-08', checkOut: '2026-09-12', guestsCount: 2, depositPaid: 60, status: 'confirmed' },
             { id: 'RES-802', guest: 'Fatma Bakari', room: '207', type: 'Deluxe Room', checkIn: '2026-09-08', checkOut: '2026-09-11', guestsCount: 2, depositPaid: 60, status: 'confirmed' },
             { id: 'RES-803', guest: 'Dr. Kassim Majaliwa', room: '505', type: 'Twins Room', checkIn: '2026-09-09', checkOut: '2026-09-13', guestsCount: 2, depositPaid: 70, status: 'confirmed' }
-        ]
+        ],
+        creditPaid: []
     },
 
     station: {
@@ -550,9 +551,108 @@ class CentralStore {
         room.checkIn = null;
         room.checkOut = null;
         room.folioCharges = 0;
+        room.payment = { crdb: 0, online: 0, credit: 0, cash: 0 };
 
         this.saveData();
         return { guestName, finalFolio };
+    }
+
+    // Records how much of a room's payment came in via each method
+    // (CRDB bank, Online, Credit, Cash). Used by the Reception payments list.
+    updateRoomPayment(roomId, field, value) {
+        const room = this.data.hotel.rooms.find(r => r.id === Number(roomId));
+        if (!room) throw new Error('Room not found');
+
+        const validFields = ['crdb', 'online', 'credit', 'cash'];
+        if (!validFields.includes(field)) throw new Error('Invalid payment field');
+
+        if (!room.payment) {
+            room.payment = { crdb: 0, online: 0, credit: 0, cash: 0 };
+        }
+        room.payment[field] = parseFloat(value) || 0;
+
+        this.saveData();
+        return room;
+    }
+
+    // Creates a future advance reservation for a room (used from the Reception
+    // date-picker view when booking ahead of time, rather than an immediate
+    // check-in). Does not touch the room's live status/guest fields.
+    createReservation(roomId, guestName, checkInStr, checkOutStr, guestsCount, depositPaid) {
+        const room = this.data.hotel.rooms.find(r => r.id === Number(roomId));
+        if (!room) throw new Error('Room not found');
+
+        if (!checkInStr || !checkOutStr || checkOutStr <= checkInStr) {
+            throw new Error('Check-out date must be after check-in date');
+        }
+
+        // Prevent double-booking: reject if this room already has a reservation
+        // or a live stay that overlaps the requested date range.
+        const overlapsExisting = this.data.hotel.reservations.some(r =>
+            r.room === room.number && checkInStr < r.checkOut && checkOutStr > r.checkIn
+        );
+        const overlapsLiveStay = room.checkIn && room.checkOut &&
+            checkInStr < room.checkOut && checkOutStr > room.checkIn;
+
+        if (overlapsExisting || overlapsLiveStay) {
+            throw new Error(`Room ${room.number} is already booked for part of that date range`);
+        }
+
+        const newReservation = {
+            id: 'RES-' + Date.now().toString(36).toUpperCase(),
+            guest: guestName,
+            room: room.number,
+            type: room.type,
+            checkIn: checkInStr,
+            checkOut: checkOutStr,
+            guestsCount: guestsCount || 1,
+            depositPaid: depositPaid || 0,
+            status: 'confirmed'
+        };
+
+        this.data.hotel.reservations.push(newReservation);
+
+        this.logAudit(
+            this.data.currentUser.name,
+            this.data.currentUser.role,
+            'RESERVATION_CREATED',
+            'Hotel',
+            `Advance reservation created for ${guestName} in Room ${room.number} (${checkInStr} to ${checkOutStr})`
+        );
+
+        this.saveData();
+        return newReservation;
+    }
+
+    addHotelCreditRow(dateIso) {
+        if (!this.data.hotel.creditPaid) this.data.hotel.creditPaid = [];
+        const row = {
+            id: 'CR-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+            date: dateIso,
+            room: '',
+            accommodation: 0,
+            food: 0,
+            drinks: 0,
+            laundry: 0,
+            crdb: 0
+        };
+        this.data.hotel.creditPaid.push(row);
+        this.saveData();
+        return row;
+    }
+
+    updateHotelCreditRow(rowId, field, value) {
+        if (!this.data.hotel.creditPaid) this.data.hotel.creditPaid = [];
+        const row = this.data.hotel.creditPaid.find(r => r.id === rowId);
+        if (!row) return;
+        row[field] = value;
+        this.saveData();
+    }
+
+    deleteHotelCreditRow(rowId) {
+        if (!this.data.hotel.creditPaid) return;
+        this.data.hotel.creditPaid = this.data.hotel.creditPaid.filter(r => r.id !== rowId);
+        this.saveData();
     }
 
     processRestaurantOrder(tableId, orderItems, chargeToRoom = null) {

@@ -9,6 +9,41 @@ class HotelModule {
     constructor() {
         this.roomFilter = 'all';
         this.floorFilter = 'all';
+        this.viewDate = null; // null = today (live view)
+    }
+
+    getTodayStr() {
+        return new Date().toISOString().split('T')[0];
+    }
+
+    // Projects what a room's status/guest would be on a given date, checking
+    // both its current live stay and any future advance reservations for
+    // that room number. Returns isLive:true only when the date is today,
+    // since only "today" reflects the actual editable/live data.
+    getRoomStatusForDate(room, dateStr) {
+        const today = this.getTodayStr();
+
+        if (dateStr === today) {
+            return { status: room.status, guest: room.guest, checkIn: room.checkIn, checkOut: room.checkOut, isLive: true };
+        }
+
+        if (room.status === 'maintenance') {
+            return { status: 'maintenance', guest: null, checkIn: null, checkOut: null, isLive: false };
+        }
+
+        // Does the room's CURRENT stay cover this date?
+        if (room.checkIn && room.checkOut && dateStr >= room.checkIn && dateStr < room.checkOut) {
+            return { status: 'occupied', guest: room.guest, checkIn: room.checkIn, checkOut: room.checkOut, isLive: false };
+        }
+
+        // Does any advance RESERVATION for this room number cover this date?
+        const reservations = window.cbmsStore.data.hotel.reservations || [];
+        const match = reservations.find(r => r.room === room.number && dateStr >= r.checkIn && dateStr < r.checkOut);
+        if (match) {
+            return { status: 'reserved', guest: match.guest, checkIn: match.checkIn, checkOut: match.checkOut, isLive: false };
+        }
+
+        return { status: 'available', guest: null, checkIn: null, checkOut: null, isLive: false };
     }
 
     render(container) {
@@ -20,13 +55,29 @@ class HotelModule {
         const maintenanceCount = rooms.filter(r => r.status === 'maintenance').length;
         const occupancyRate = ((occupiedCount / rooms.length) * 100).toFixed(0);
 
-        let filteredRooms = rooms;
+        const todayStr = this.getTodayStr();
+        const viewDateStr = this.viewDate || todayStr;
+        const isViewingToday = viewDateStr === todayStr;
+
+        // Attach a projected status/guest to each room for the selected date,
+        // without touching the room's actual stored data.
+        const roomsWithProjection = rooms.map(room => ({
+            room,
+            projected: this.getRoomStatusForDate(room, viewDateStr)
+        }));
+
+        let filteredRooms = roomsWithProjection;
         if (this.roomFilter !== 'all') {
-            filteredRooms = filteredRooms.filter(r => r.status === this.roomFilter);
+            filteredRooms = filteredRooms.filter(r => r.projected.status === this.roomFilter);
         }
         if (this.floorFilter && this.floorFilter !== 'all') {
-            filteredRooms = filteredRooms.filter(r => r.floor === Number(this.floorFilter));
+            filteredRooms = filteredRooms.filter(r => r.room.floor === Number(this.floorFilter));
         }
+
+        // Counts shown in the filter pills reflect the SELECTED date, not just today
+        const projAvailable = roomsWithProjection.filter(r => r.projected.status === 'available').length;
+        const projOccupied = roomsWithProjection.filter(r => r.projected.status === 'occupied').length;
+        const projReserved = roomsWithProjection.filter(r => r.projected.status === 'reserved').length;
 
         container.innerHTML = `
             <div class="module-header fade-in">
@@ -94,15 +145,22 @@ class HotelModule {
                 </div>
             </div>
 
-            <!-- Room Grid, Floor Filters & Status Filter -->
+            <!-- Room List, Floor Filters & Status Filter -->
             <div class="card mt-4 fade-in">
                 <div class="card-header">
                     <div class="card-title-group">
-                        <h2 class="card-title">Live 40-Room Status Grid & Floor Map</h2>
+                        <h2 class="card-title">Reception - Room & Payments List</h2>
                         <span class="card-hint">Standard (50k TSh/$20) &bull; Superior Standard (60k TSh/$25) &bull; Deluxe (70k TSh/$30) &bull; Twins (90k TSh/$35)</span>
                     </div>
-                    
+
                     <div class="filter-controls-group">
+                        <!-- Date Picker -->
+                        <div class="role-switcher-wrap mr-2">
+                            <span class="role-switcher-label"><i data-lucide="calendar"></i></span>
+                            <input type="date" class="role-select" id="hotelViewDate" value="${viewDateStr}" style="cursor:pointer;" />
+                        </div>
+                        ${!isViewingToday ? `<button class="btn btn-xs btn-outline mr-2" id="btnResetToToday">Today</button>` : ''}
+
                         <!-- Floor Filter Pills -->
                         <div class="filter-pills mr-2" id="hotelFloorFilters">
                             <button class="pill-btn ${this.floorFilter === 'all' ? 'active' : ''}" data-floor="all">All Floors (40)</button>
@@ -113,80 +171,116 @@ class HotelModule {
                             <button class="pill-btn ${this.floorFilter === '5' ? 'active' : ''}" data-floor="5">Fl 5 (8)</button>
                         </div>
 
-                        <!-- Status Filter Pills -->
+                        <!-- Status Filter Pills (reflect the selected date) -->
                         <div class="filter-pills" id="hotelRoomFilters">
                             <button class="pill-btn ${this.roomFilter === 'all' ? 'active' : ''}" data-filter="all">All</button>
-                            <button class="pill-btn ${this.roomFilter === 'available' ? 'active' : ''}" data-filter="available">Avail (${availableCount})</button>
-                            <button class="pill-btn ${this.roomFilter === 'occupied' ? 'active' : ''}" data-filter="occupied">Occ (${occupiedCount})</button>
-                            <button class="pill-btn ${this.roomFilter === 'reserved' ? 'active' : ''}" data-filter="reserved">Res (${reservedCount})</button>
+                            <button class="pill-btn ${this.roomFilter === 'available' ? 'active' : ''}" data-filter="available">Avail (${projAvailable})</button>
+                            <button class="pill-btn ${this.roomFilter === 'occupied' ? 'active' : ''}" data-filter="occupied">Occ (${projOccupied})</button>
+                            <button class="pill-btn ${this.roomFilter === 'reserved' ? 'active' : ''}" data-filter="reserved">Res (${projReserved})</button>
                         </div>
                     </div>
                 </div>
 
-                <div class="room-grid">
-                    ${filteredRooms.map(room => {
-                        let statusBadge = '';
-                        let borderClass = '';
-                        if (room.status === 'available') {
-                            statusBadge = '<span class="badge badge-success">Available</span>';
-                            borderClass = 'border-avail';
-                        } else if (room.status === 'occupied') {
-                            statusBadge = '<span class="badge badge-primary">Occupied</span>';
-                            borderClass = 'border-occ';
-                        } else if (room.status === 'reserved') {
-                            statusBadge = '<span class="badge badge-warning">Reserved</span>';
-                            borderClass = 'border-res';
-                        } else {
-                            statusBadge = '<span class="badge badge-neutral">Maintenance</span>';
-                            borderClass = 'border-maint';
-                        }
+                ${!isViewingToday ? `
+                    <div class="alert alert-info mb-3" style="margin: 0 22px 18px;">
+                        <i data-lucide="info"></i>
+                        <div>Showing projected room status for <strong>${viewDateStr}</strong> based on current stays and advance reservations. Payment entry and check-in/out actions are only available on today's live view &mdash; click "Today" to return.</div>
+                    </div>
+                ` : ''}
 
-                        const rateTshFormatted = (room.rateTsh || 50000).toLocaleString();
+                <div class="table-responsive">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Room No.</th>
+                                <th>Price</th>
+                                <th>Client Name</th>
+                                <th>CRDB</th>
+                                <th>Online</th>
+                                <th>Credit</th>
+                                <th>Cash</th>
+                                <th class="text-right">Amount</th>
+                                <th class="text-right">Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${filteredRooms.map(({ room, projected }) => {
+                                const payment = room.payment || { crdb: 0, online: 0, credit: 0, cash: 0 };
+                                const rowAmount = (payment.crdb || 0) + (payment.online || 0) + (payment.credit || 0) + (payment.cash || 0);
+                                const rateTshFormatted = (room.rateTsh || 50000).toLocaleString();
+                                const hasGuest = !!projected.guest;
+                                const canEdit = projected.isLive; // payments/actions only editable on today's live view
 
-                        return `
-                            <div class="room-card ${borderClass}" data-room-id="${room.id}">
-                                <div class="room-card-header">
-                                    <span class="room-number">Room ${room.number}</span>
-                                    ${statusBadge}
-                                </div>
-                                <div class="room-type font-bold text-xs">${room.type} (Floor ${room.floor})</div>
-                                <div class="room-price font-mono font-bold text-sm">
-                                    ${rateTshFormatted}/= TSh <span class="text-xs text-muted">($${room.rateUsd || room.rate})</span>
-                                </div>
-                                ${room.bookViaCall ? '<span class="badge badge-danger text-xs mt-1">Book via Call / WhatsApp</span>' : ''}
+                                let statusBadge = '';
+                                if (projected.status === 'available') statusBadge = '<span class="badge badge-success">Available</span>';
+                                else if (projected.status === 'occupied') statusBadge = '<span class="badge badge-primary">Occupied</span>';
+                                else if (projected.status === 'reserved') statusBadge = '<span class="badge badge-warning">Reserved</span>';
+                                else statusBadge = '<span class="badge badge-neutral">Maintenance</span>';
 
-                                <div class="room-body">
-                                    ${room.guest ? `
-                                        <div class="guest-info">
-                                            <div class="guest-name"><i data-lucide="user"></i> ${room.guest}</div>
-                                            <div class="guest-dates text-xs text-muted">In: ${room.checkIn} | Out: ${room.checkOut}</div>
-                                            <div class="folio-total text-xs font-bold text-emerald">Folio: €${room.folioCharges.toFixed(2)} ($${(room.folioCharges).toFixed(0)})</div>
-                                        </div>
-                                    ` : `
-                                        <div class="guest-empty text-muted text-xs">
-                                            ${room.status === 'available' ? 'Ready for guest check-in' : (room.status === 'reserved' ? 'Awaiting guest arrival' : 'Room out of service')}
-                                        </div>
-                                    `}
-                                </div>
+                                const paymentInput = (field) => `
+                                    <input type="number" class="form-control payment-input"
+                                        data-room-id="${room.id}" data-field="${field}"
+                                        value="${payment[field] || 0}" min="0" step="1000"
+                                        style="width:90px; padding:4px 6px;"
+                                        ${(!hasGuest || !canEdit) ? 'disabled' : ''} />
+                                `;
 
-                                <div class="room-actions">
-                                    ${room.status === 'available' ? `
-                                        <button class="btn btn-xs btn-primary btn-room-checkin" data-room-id="${room.id}">Check-In</button>
-                                    ` : ''}
-                                    ${room.status === 'occupied' ? `
-                                        <button class="btn btn-xs btn-outline btn-room-folio" data-room-id="${room.id}">Folio</button>
-                                        <button class="btn btn-xs btn-danger btn-room-checkout" data-room-id="${room.id}">Check-Out</button>
-                                    ` : ''}
-                                    ${room.status === 'reserved' ? `
-                                        <button class="btn btn-xs btn-warning btn-room-checkin" data-room-id="${room.id}">Arrived (Check-In)</button>
-                                    ` : ''}
-                                    ${room.status === 'maintenance' ? `
-                                        <button class="btn btn-xs btn-outline btn-mark-available" data-room-id="${room.id}">Mark Ready</button>
-                                    ` : ''}
-                                </div>
-                            </div>
-                        `;
-                    }).join('')}
+                                let actionBtn = '<span class="text-xs text-muted">&mdash;</span>';
+                                if (canEdit) {
+                                    if (projected.status === 'available') {
+                                        actionBtn = `<button class="btn btn-xs btn-primary btn-room-checkin" data-room-id="${room.id}">Check-In</button>`;
+                                    } else if (projected.status === 'occupied') {
+                                        actionBtn = `
+                                            <button class="btn btn-xs btn-outline btn-room-folio" data-room-id="${room.id}">Folio</button>
+                                            <button class="btn btn-xs btn-danger btn-room-checkout" data-room-id="${room.id}">Check-Out</button>
+                                        `;
+                                    } else if (projected.status === 'reserved') {
+                                        actionBtn = `<button class="btn btn-xs btn-warning btn-room-checkin" data-room-id="${room.id}">Arrived</button>`;
+                                    } else {
+                                        actionBtn = `<button class="btn btn-xs btn-outline btn-mark-available" data-room-id="${room.id}">Mark Ready</button>`;
+                                    }
+                                } else if (projected.status === 'available') {
+                                    actionBtn = `<button class="btn btn-xs btn-primary btn-room-reserve" data-room-id="${room.id}">Reserve</button>`;
+                                } else if (projected.status !== 'maintenance') {
+                                    actionBtn = `<span class="text-xs text-muted">${projected.checkIn} &rarr; ${projected.checkOut}</span>`;
+                                }
+
+                                return `
+                                    <tr data-room-row="${room.id}">
+                                        <td>
+                                            <strong>${room.number}</strong>
+                                            <div class="text-xs text-muted">${room.type} &bull; Fl ${room.floor}</div>
+                                            <div class="mt-1">${statusBadge}</div>
+                                        </td>
+                                        <td class="font-mono text-sm">
+                                            ${rateTshFormatted}/= TSh<br />
+                                            <span class="text-xs text-muted">($${room.rateUsd || room.rate})</span>
+                                        </td>
+                                        <td>${projected.guest || '<span class="text-muted">&mdash;</span>'}</td>
+                                        <td>${paymentInput('crdb')}</td>
+                                        <td>${paymentInput('online')}</td>
+                                        <td>${paymentInput('credit')}</td>
+                                        <td>${paymentInput('cash')}</td>
+                                        <td class="text-right font-bold row-amount" data-room-amount="${room.id}">${canEdit ? rowAmount.toLocaleString() + '/=' : '<span class="text-muted">&mdash;</span>'}</td>
+                                        <td class="text-right">${actionBtn}</td>
+                                    </tr>
+
+                                `;
+                            }).join('')}
+                        </tbody>
+                        <tfoot>
+                            <tr>
+                                <td colspan="7" class="text-right font-bold">Total Amount${!isViewingToday ? ' (today\'s live payments)' : ''}</td>
+                                <td class="text-right font-bold text-emerald" id="hotelPaymentsTotal">
+                                    ${filteredRooms.reduce((sum, { room }) => {
+                                        const p = room.payment || { crdb: 0, online: 0, credit: 0, cash: 0 };
+                                        return sum + (p.crdb || 0) + (p.online || 0) + (p.credit || 0) + (p.cash || 0);
+                                    }, 0).toLocaleString()}/=
+                                </td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
+                    </table>
                 </div>
             </div>
 
@@ -231,13 +325,133 @@ class HotelModule {
                     </table>
                 </div>
             </div>
+
+            ${this.renderCreditPaidSection()}
         `;
 
         this.bindEvents(container);
         if (window.lucide) window.lucide.createIcons();
     }
 
+    renderCreditPaidSection() {
+        if (!window.cbmsStore.data.hotel.creditPaid) window.cbmsStore.data.hotel.creditPaid = [];
+        const allRows = window.cbmsStore.data.hotel.creditPaid;
+
+        const today = new Date();
+        const yesterday = new Date();
+        yesterday.setDate(today.getDate() - 1);
+        const todayIso = today.toISOString().split('T')[0];
+        const yesterdayIso = yesterday.toISOString().split('T')[0];
+
+        const todayRows = allRows.filter(r => r.date === todayIso);
+        const yesterdayRows = allRows.filter(r => r.date === yesterdayIso);
+
+        return `
+            <div class="card mt-4 fade-in">
+                <div class="card-header">
+                    <div class="card-title-group">
+                        <h2 class="card-title">Credit Paid &mdash; Guest Debt Clearance Ledger</h2>
+                        <span class="card-hint">For guests settling an earlier part-paid stay &bull; CRDB = amount paid via bank (CRDB)</span>
+                    </div>
+                    <span class="badge badge-info">Yesterday &amp; Today</span>
+                </div>
+                <div class="credit-tables-grid">
+                    ${this.renderCreditTable('Yesterday', yesterdayIso, yesterdayRows)}
+                    ${this.renderCreditTable('Today', todayIso, todayRows)}
+                </div>
+            </div>
+        `;
+    }
+
+    renderCreditTable(label, dateIso, rows) {
+        const sums = rows.reduce((acc, r) => {
+            const accom = Number(r.accommodation) || 0;
+            const food = Number(r.food) || 0;
+            const drinks = Number(r.drinks) || 0;
+            const laundry = Number(r.laundry) || 0;
+            acc.accommodation += accom;
+            acc.food += food;
+            acc.drinks += drinks;
+            acc.laundry += laundry;
+            acc.total += accom + food + drinks + laundry;
+            acc.crdb += Number(r.crdb) || 0;
+            return acc;
+        }, { accommodation: 0, food: 0, drinks: 0, laundry: 0, total: 0, crdb: 0 });
+
+        return `
+            <div class="credit-table-block">
+                <div class="credit-section-title">
+                    <h3 class="card-title text-sm">${label} <span class="text-muted font-mono text-xs">(${dateIso})</span></h3>
+                    <button class="btn btn-xs btn-outline btn-add-credit-row" data-date="${dateIso}">
+                        <i data-lucide="plus"></i> Add Row
+                    </button>
+                </div>
+                <div class="table-responsive">
+                    <table class="data-table credit-table">
+                        <thead>
+                            <tr>
+                                <th>Room No.</th>
+                                <th>Accommodation</th>
+                                <th>Food</th>
+                                <th>Drinks</th>
+                                <th>Laundry</th>
+                                <th>Total</th>
+                                <th>CRDB (Bank)</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${rows.length === 0 ? `
+                                <tr>
+                                    <td colspan="8" class="text-center text-muted text-xs">No credit entries recorded for ${label.toLowerCase()}.</td>
+                                </tr>
+                            ` : rows.map(row => {
+                                const total = (Number(row.accommodation) || 0) + (Number(row.food) || 0) + (Number(row.drinks) || 0) + (Number(row.laundry) || 0);
+                                return `
+                                    <tr>
+                                        <td><input type="text" class="credit-cell-input credit-room-input" data-row-id="${row.id}" data-field="room" value="${row.room || ''}" placeholder="e.g. 204" /></td>
+                                        <td><input type="number" class="credit-cell-input" data-row-id="${row.id}" data-field="accommodation" value="${row.accommodation || 0}" min="0" step="0.01" /></td>
+                                        <td><input type="number" class="credit-cell-input" data-row-id="${row.id}" data-field="food" value="${row.food || 0}" min="0" step="0.01" /></td>
+                                        <td><input type="number" class="credit-cell-input" data-row-id="${row.id}" data-field="drinks" value="${row.drinks || 0}" min="0" step="0.01" /></td>
+                                        <td><input type="number" class="credit-cell-input" data-row-id="${row.id}" data-field="laundry" value="${row.laundry || 0}" min="0" step="0.01" /></td>
+                                        <td class="credit-total-cell font-mono font-bold" data-row-id="${row.id}">${total.toFixed(2)}</td>
+                                        <td><input type="number" class="credit-cell-input" data-row-id="${row.id}" data-field="crdb" value="${row.crdb || 0}" min="0" step="0.01" /></td>
+                                        <td><button class="btn btn-xs btn-danger btn-delete-credit-row" data-row-id="${row.id}" title="Remove row"><i data-lucide="trash-2"></i></button></td>
+                                    </tr>
+                                `;
+                            }).join('')}
+                        </tbody>
+                        <tfoot>
+                            <tr>
+                                <td class="font-bold">Total</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="accommodation">${sums.accommodation.toFixed(2)}</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="food">${sums.food.toFixed(2)}</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="drinks">${sums.drinks.toFixed(2)}</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="laundry">${sums.laundry.toFixed(2)}</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="total">${sums.total.toFixed(2)}</td>
+                                <td class="font-mono font-bold credit-footer-cell" data-date="${dateIso}" data-col="crdb">${sums.crdb.toFixed(2)}</td>
+                                <td></td>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+        `;
+    }
+
     bindEvents(container) {
+        // Date picker - view projected room status for any date
+        container.querySelector('#hotelViewDate')?.addEventListener('change', (e) => {
+            this.viewDate = e.target.value || null;
+            this.render(container);
+        });
+
+        // Reset to today's live view
+        container.querySelector('#btnResetToToday')?.addEventListener('click', () => {
+            this.viewDate = null;
+            this.render(container);
+        });
+
         // Floor filter pills
         container.querySelectorAll('#hotelFloorFilters button').forEach(btn => {
             btn.addEventListener('click', () => {
@@ -254,6 +468,14 @@ class HotelModule {
             });
         });
 
+        // Reserve buttons (available rooms on a future/past date view)
+        container.querySelectorAll('.btn-room-reserve').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const roomId = btn.dataset.roomId;
+                this.showNewReservationModal(roomId);
+            });
+        });
+
         // Top Check-in button
         container.querySelector('#btnOpenCheckIn')?.addEventListener('click', () => {
             this.showCheckInModal();
@@ -261,7 +483,7 @@ class HotelModule {
 
         // Top Reservation button
         container.querySelector('#btnOpenReservation')?.addEventListener('click', () => {
-            this.showReservationModal();
+            this.showNewReservationModal();
         });
 
         // Room action buttons
@@ -297,6 +519,104 @@ class HotelModule {
                     this.render(container);
                 }
             });
+        });
+
+        // Payment method inputs (CRDB / Online / Credit / Cash) in the reception list
+        container.querySelectorAll('.payment-input').forEach(input => {
+            input.addEventListener('change', (e) => {
+                const roomId = e.target.dataset.roomId;
+                const field = e.target.dataset.field;
+                const value = e.target.value;
+
+                try {
+                    window.cbmsStore.updateRoomPayment(roomId, field, value);
+
+                    // Recompute this row's Amount cell without a full re-render
+                    const room = window.cbmsStore.data.hotel.rooms.find(r => r.id === Number(roomId));
+                    const p = room.payment || { crdb: 0, online: 0, credit: 0, cash: 0 };
+                    const rowAmount = (p.crdb || 0) + (p.online || 0) + (p.credit || 0) + (p.cash || 0);
+                    const rowAmountCell = container.querySelector(`[data-room-amount="${roomId}"]`);
+                    if (rowAmountCell) rowAmountCell.textContent = `${rowAmount.toLocaleString()}/=`;
+
+                    // Recompute the grand total footer
+                    const rooms = window.cbmsStore.data.hotel.rooms;
+                    let filtered = rooms;
+                    if (this.roomFilter !== 'all') filtered = filtered.filter(r => r.status === this.roomFilter);
+                    if (this.floorFilter && this.floorFilter !== 'all') filtered = filtered.filter(r => r.floor === Number(this.floorFilter));
+                    const grandTotal = filtered.reduce((sum, r) => {
+                        const rp = r.payment || { crdb: 0, online: 0, credit: 0, cash: 0 };
+                        return sum + (rp.crdb || 0) + (rp.online || 0) + (rp.credit || 0) + (rp.cash || 0);
+                    }, 0);
+                    const totalCell = document.getElementById('hotelPaymentsTotal');
+                    if (totalCell) totalCell.textContent = `${grandTotal.toLocaleString()}/=`;
+
+                    window.cbmsApp.showToast(`Payment updated for Room ${room.number}`, 'success');
+                } catch (err) {
+                    window.cbmsApp.showToast(err.message, 'error');
+                }
+            });
+        });
+
+        // Credit Paid ledger: add row
+        container.querySelectorAll('.btn-add-credit-row').forEach(btn => {
+            btn.addEventListener('click', () => {
+                window.cbmsStore.addHotelCreditRow(btn.dataset.date);
+                this.render(container);
+            });
+        });
+
+        // Credit Paid ledger: delete row
+        container.querySelectorAll('.btn-delete-credit-row').forEach(btn => {
+            btn.addEventListener('click', () => {
+                window.cbmsStore.deleteHotelCreditRow(btn.dataset.rowId);
+                this.render(container);
+            });
+        });
+
+        // Credit Paid ledger: editable cells (live totals, no full re-render)
+        container.querySelectorAll('.credit-cell-input').forEach(input => {
+            input.addEventListener('input', () => {
+                const rowId = input.dataset.rowId;
+                const field = input.dataset.field;
+                const value = field === 'room' ? input.value : (parseFloat(input.value) || 0);
+                window.cbmsStore.updateHotelCreditRow(rowId, field, value);
+                if (field !== 'room') {
+                    this.updateCreditRowTotals(container, rowId);
+                }
+            });
+        });
+    }
+
+    updateCreditRowTotals(container, rowId) {
+        const row = (window.cbmsStore.data.hotel.creditPaid || []).find(r => r.id === rowId);
+        if (!row) return;
+
+        const total = (Number(row.accommodation) || 0) + (Number(row.food) || 0) + (Number(row.drinks) || 0) + (Number(row.laundry) || 0);
+        const totalCell = container.querySelector(`.credit-total-cell[data-row-id="${rowId}"]`);
+        if (totalCell) totalCell.textContent = total.toFixed(2);
+
+        this.updateCreditFooter(container, row.date);
+    }
+
+    updateCreditFooter(container, dateIso) {
+        const rows = (window.cbmsStore.data.hotel.creditPaid || []).filter(r => r.date === dateIso);
+        const sums = rows.reduce((acc, r) => {
+            const accom = Number(r.accommodation) || 0;
+            const food = Number(r.food) || 0;
+            const drinks = Number(r.drinks) || 0;
+            const laundry = Number(r.laundry) || 0;
+            acc.accommodation += accom;
+            acc.food += food;
+            acc.drinks += drinks;
+            acc.laundry += laundry;
+            acc.total += accom + food + drinks + laundry;
+            acc.crdb += Number(r.crdb) || 0;
+            return acc;
+        }, { accommodation: 0, food: 0, drinks: 0, laundry: 0, total: 0, crdb: 0 });
+
+        Object.keys(sums).forEach(col => {
+            const cell = container.querySelector(`.credit-footer-cell[data-date="${dateIso}"][data-col="${col}"]`);
+            if (cell) cell.textContent = sums[col].toFixed(2);
         });
     }
 
@@ -513,8 +833,109 @@ class HotelModule {
         }
     }
 
-    showReservationModal() {
-        window.cbmsApp.showToast('New reservation slot saved to registry.', 'info');
+    showNewReservationModal(preSelectedRoomId = null) {
+        const rooms = window.cbmsStore.data.hotel.rooms;
+        // Offer every room except ones currently under maintenance; the actual
+        // date/overlap check happens on submit via store.createReservation.
+        const selectableRooms = rooms.filter(r => r.status !== 'maintenance');
+
+        if (selectableRooms.length === 0) {
+            window.cbmsApp.showToast('No rooms available to reserve right now.', 'error');
+            return;
+        }
+
+        const defaultCheckIn = this.viewDate || this.getTodayStr();
+
+        const modalHtml = `
+            <div class="modal-backdrop fade-in" id="newReservationModal">
+                <div class="modal-card">
+                    <div class="modal-header">
+                        <div>
+                            <h3 class="modal-title">New Advance Reservation</h3>
+                            <p class="modal-subtitle">Book a room ahead of time for a future guest arrival</p>
+                        </div>
+                        <button class="modal-close-btn" onclick="document.getElementById('newReservationModal').remove()">&times;</button>
+                    </div>
+                    <form id="newReservationForm">
+                        <div class="modal-body">
+                            <div class="form-group">
+                                <label class="form-label">Select Room</label>
+                                <select class="form-control" id="resRoomSelect" required>
+                                    ${selectableRooms.map(r => `
+                                        <option value="${r.id}" ${r.id === Number(preSelectedRoomId) ? 'selected' : ''}>
+                                            Room ${r.number} (Floor ${r.floor}) &mdash; ${r.type} (${(r.rateTsh || 50000).toLocaleString()}/= TSh / $${r.rateUsd || r.rate})
+                                        </option>
+                                    `).join('')}
+                                </select>
+                            </div>
+
+                            <div class="form-group">
+                                <label class="form-label">Full Guest Name</label>
+                                <input type="text" class="form-control" id="resGuestName" placeholder="e.g. Dr. Catherine Bennett" required />
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group col-6">
+                                    <label class="form-label">Check-In Date</label>
+                                    <input type="date" class="form-control" id="resCheckIn" value="${defaultCheckIn}" required />
+                                </div>
+                                <div class="form-group col-6">
+                                    <label class="form-label">Nights Stay</label>
+                                    <input type="number" class="form-control" id="resNights" value="2" min="1" max="60" required />
+                                </div>
+                            </div>
+
+                            <div class="form-row">
+                                <div class="form-group col-6">
+                                    <label class="form-label">Number of Guests</label>
+                                    <input type="number" class="form-control" id="resGuestsCount" value="1" min="1" max="10" required />
+                                </div>
+                                <div class="form-group col-6">
+                                    <label class="form-label">Deposit Paid (TSh)</label>
+                                    <input type="number" class="form-control" id="resDeposit" value="0" min="0" step="1000" />
+                                </div>
+                            </div>
+
+                            <div class="alert alert-info">
+                                <i data-lucide="info"></i> This reserves the room for the selected dates without checking the guest in yet. Use "Arrived (Check-In)" on the reservation once they arrive.
+                            </div>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-outline" onclick="document.getElementById('newReservationModal').remove()">Cancel</button>
+                            <button type="submit" class="btn btn-primary"><i data-lucide="calendar-check"></i> Create Reservation</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        `;
+
+        const existing = document.getElementById('newReservationModal');
+        if (existing) existing.remove();
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+        if (window.lucide) window.lucide.createIcons();
+
+        document.getElementById('newReservationForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const roomId = document.getElementById('resRoomSelect').value;
+            const guestName = document.getElementById('resGuestName').value.trim();
+            const checkInStr = document.getElementById('resCheckIn').value;
+            const nights = parseInt(document.getElementById('resNights').value, 10);
+            const guestsCount = parseInt(document.getElementById('resGuestsCount').value, 10);
+            const deposit = parseFloat(document.getElementById('resDeposit').value || 0);
+
+            const checkInDate = new Date(checkInStr);
+            const checkOutDate = new Date(checkInDate.getTime() + (nights * 24 * 60 * 60 * 1000));
+            const checkOutStr = checkOutDate.toISOString().split('T')[0];
+
+            try {
+                window.cbmsStore.createReservation(roomId, guestName, checkInStr, checkOutStr, guestsCount, deposit);
+                document.getElementById('newReservationModal').remove();
+                window.cbmsApp.showToast(`Reservation created for ${guestName}: ${checkInStr} to ${checkOutStr}.`, 'success');
+                this.render(document.getElementById('moduleContainer'));
+            } catch (err) {
+                window.cbmsApp.showToast(err.message, 'error');
+            }
+        });
     }
 }
 
